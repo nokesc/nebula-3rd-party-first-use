@@ -16,7 +16,7 @@ Instead, we:
 ### mise
 - **Wrapper**: `scripts/mise/install.sh`
 - **Cached Installer**: `scripts/mise/upstream-install.sh`
-- **Manifest**: `manifests/mise.json`
+- **Manifest**: `manifests/mise/latest` & `manifests/mise/<version>.conf`
 
 ## Usage
 
@@ -26,7 +26,10 @@ To install `mise` in a project (CI or Local):
 # Clone or submodule this repo, then run:
 ./scripts/mise/install.sh
 
-# Or specify a version (must be in manifest)
+# Or curl directly (no submodule required):
+curl -sSfL https://raw.githubusercontent.com/nokesc/nebula-3rd-party-first-use/main/scripts/mise/install.sh | bash
+
+# Or specify a version (must represent a valid config file in manifests/mise/)
 MISE_VERSION=v2026.1.5 ./scripts/mise/install.sh
 ```
 
@@ -34,5 +37,6 @@ MISE_VERSION=v2026.1.5 ./scripts/mise/install.sh
 
 When `mise` releases a new version:
 1.  Verify the new version is safe.
-2.  Update `manifests/mise.json` to include the new version.
-3.  (If upstream script changed) Update `scripts/mise/upstream-install.sh` and the checksum in the manifest.
+2.  Update `manifests/mise/latest` to point to the new version.
+3.  Create a new config file `manifests/mise/<version>.conf` with the bootstrapper SHA and allowed platforms.
+4.  (If upstream script changed) Update `scripts/mise/upstream-install.sh` and the checksum in the new config.
