@@ -2,33 +2,94 @@
 set -e
 
 # Paths
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../" && pwd)"
-MANIFEST_FILE="$REPO_ROOT/manifests/mise.json"
-UPSTREAM_SCRIPT="$SCRIPT_DIR/upstream-install.sh"
+MANIFEST_DIR_REL="manifests/mise"
+UPSTREAM_REL_PATH="scripts/mise/upstream-install.sh"
+# Default to main branch, but allow override
+BRANCH="${NEBULA_REPO_BRANCH:-master}"
+RAW_REPO_BASE="${NEBULA_RAW_REPO_BASE:-https://raw.githubusercontent.com/nokesc/nebula-3rd-party-first-use/$BRANCH}"
 
-# Helper to look up JSON values with simple grep/cut (avoids jq dependency)
-get_manifest_value() {
-    local key=$1
-    grep "\"$key\":" "$MANIFEST_FILE" | head -n1 | cut -d '"' -f 4
+# Detect execution mode (Local vs Remote/Curl)
+MODE="remote"
+if [ -n "${BASH_SOURCE[0]}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    SCRIPT_PATH="${BASH_SOURCE[0]}"
+    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+    # Verify we are in the repo structure
+    # Check for the latest file as a proxy for the dir existence
+    if [ -f "$SCRIPT_DIR/../../$MANIFEST_DIR_REL/latest" ]; then
+        MODE="local"
+    fi
+fi
+
+TEMP_DIR=""
+cleanup() {
+    if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
+        rm -rf -- "$TEMP_DIR"
+    fi
 }
+trap cleanup EXIT
 
-# 1. Determine Version
-LATEST_VERSION=$(get_manifest_value "latest_validated")
-REQUESTED_VERSION="${MISE_VERSION:-$LATEST_VERSION}"
+if [ "$MODE" = "local" ]; then
+    REPO_ROOT="$(cd "$SCRIPT_DIR/../../" && pwd)"
+    MANIFEST_DIR="$REPO_ROOT/$MANIFEST_DIR_REL"
+    UPSTREAM_SCRIPT="$SCRIPT_DIR/upstream-install.sh"
+    
+    # 1. Determine Version
+    if [ -n "$MISE_VERSION" ]; then
+        REQUESTED_VERSION="$MISE_VERSION"
+    else
+        REQUESTED_VERSION=$(cat "$MANIFEST_DIR/latest")
+    fi
+    
+    CONFIG_FILE="$MANIFEST_DIR/${REQUESTED_VERSION}.conf"
+    
+else
+    echo "Nebula: Remote execution detected. Fetching resources from $RAW_REPO_BASE..."
+    
+    TEMP_DIR="$(mktemp -d)"
+    UPSTREAM_SCRIPT="$TEMP_DIR/upstream-install.sh"
+    
+    CURL_OPTS=(-sfL)
+    if [ -n "$GITHUB_TOKEN" ]; then
+        echo "Nebula: Using GITHUB_TOKEN for authentication."
+        CURL_OPTS+=(-H "Authorization: token $GITHUB_TOKEN")
+    fi
+    
+    # 1. Determine Version
+    if [ -n "$MISE_VERSION" ]; then
+        REQUESTED_VERSION="$MISE_VERSION"
+    else
+        # Fetch latest
+        REQUESTED_VERSION=$(curl "${CURL_OPTS[@]}" "$RAW_REPO_BASE/$MANIFEST_DIR_REL/latest") || { echo "Error: Failed to fetch latest version"; exit 1; }
+    fi
+    # Trim whitespace just in case
+    REQUESTED_VERSION=$(echo "$REQUESTED_VERSION" | xargs)
+    
+    CONFIG_FILE="$TEMP_DIR/${REQUESTED_VERSION}.conf"
+    
+    # Fetch Config & Upstream
+    curl "${CURL_OPTS[@]}" "$RAW_REPO_BASE/$MANIFEST_DIR_REL/${REQUESTED_VERSION}.conf" -o "$CONFIG_FILE" || { echo "Error: Failed to download config for $REQUESTED_VERSION"; exit 1; }
+    curl "${CURL_OPTS[@]}" "$RAW_REPO_BASE/$UPSTREAM_REL_PATH" -o "$UPSTREAM_SCRIPT" || { echo "Error: Failed to download upstream script"; exit 1; }
+fi
 
 echo "Nebula: Requesting install for mise version: $REQUESTED_VERSION"
 
-# 2. Validate Bootstrapper Integrity
-# Extract the specific SHA for this version from the manifest block
-# This finds the version key, looks at the next 10 lines (context), finds the sha line, and extracts value.
-EXPECTED_SHA=$(grep -A 10 "\"$REQUESTED_VERSION\"" "$MANIFEST_FILE" | grep '"bootstrapper_sha256":' | head -n1 | cut -d '"' -f 4)
-
-if [ -z "$EXPECTED_SHA" ]; then
-  echo "Error: Version '$REQUESTED_VERSION' is not allowed/validated in $MANIFEST_FILE"
-  exit 1
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Error: Configuration file for version '$REQUESTED_VERSION' not found."
+    exit 1
 fi
 
+# 2. Parse Config
+# We source the values safely by reading the file line by line or using simple grep/cut
+# Using grep/cut to avoid arbitrary code execution from sourced files (paranoia)
+EXPECTED_SHA=$(grep "^BOOTSTRAPPER_SHA256=" "$CONFIG_FILE" | cut -d= -f2 | xargs)
+ALLOWED_PLATFORMS=$(grep "^ALLOWED_PLATFORMS=" "$CONFIG_FILE" | cut -d= -f2 | xargs)
+
+if [ -z "$EXPECTED_SHA" ]; then
+    echo "Error: BOOTSTRAPPER_SHA256 not found in $CONFIG_FILE"
+    exit 1
+fi
+
+# 3. Validate Bootstrapper Integrity
 if [ ! -f "$UPSTREAM_SCRIPT" ]; then
     echo "Error: Upstream script not found at $UPSTREAM_SCRIPT"
     exit 1
@@ -44,26 +105,23 @@ if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
   exit 1
 fi
 
-# 3. Validate Architecture
+# 4. Validate Architecture
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
-# Normalize arch to match mise conventions
 if [ "$ARCH" = "x86_64" ]; then ARCH="x64"; fi
 if [ "$ARCH" = "aarch64" ]; then ARCH="arm64"; fi
-
 PLATFORM="${OS}-${ARCH}"
 
-# Check if this platform is allowed for this version
-# This scans the version block for the platform string
-if ! grep -A 10 "\"$REQUESTED_VERSION\"" "$MANIFEST_FILE" | grep -q "\"$PLATFORM\""; then
-   echo "Error: Platform '$PLATFORM' is not in the validated allowed list for version $REQUESTED_VERSION."
+# Check allowed platforms (comma separated)
+if [[ ",$ALLOWED_PLATFORMS," != *",$PLATFORM,"* ]]; then
+   echo "Error: Platform '$PLATFORM' is not in the allowed list: $ALLOWED_PLATFORMS"
    exit 1
 fi
 
 echo "Nebula: Validation Passed (Script SHA & Platform $PLATFORM verified)."
 echo "Nebula: Executing upstream installer..."
 
-# 4. Execute Protected Installer
+# 5. Execute Protected Installer
 export MISE_VERSION="$REQUESTED_VERSION"
 # We run the cached script
 bash "$UPSTREAM_SCRIPT"

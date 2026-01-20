@@ -1,0 +1,76 @@
+name: Auto-Update Mise
+on:
+  # schedule:
+  #   - cron: '0 8 * * *' # Run daily at 8am UTC
+  workflow_dispatch:
+
+jobs:
+  update-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run Maintenance Script
+        id: maintenance
+        run: |
+          # Checks for updates, creates branch, modifies files if needed
+          python3 scripts/maintenance/update-mise.py
+
+      - name: Check Execution State
+        id: check_state
+        run: |
+          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          echo "current_branch=$CURRENT_BRANCH" >> $GITHUB_OUTPUT
+
+          if [[ "$CURRENT_BRANCH" == "master" || "$CURRENT_BRANCH" == "main" ]]; then
+            echo "updated=false" >> $GITHUB_OUTPUT
+            echo "No update found."
+          else
+            echo "updated=true" >> $GITHUB_OUTPUT
+            echo "Update found, switched to $CURRENT_BRANCH"
+          fi
+
+      - name: Commit and Push
+        if: steps.check_state.outputs.updated == 'true'
+        run: |
+          git add manifests/ scripts/
+          git commit -m "chore: update mise to detected version"
+          # Force push to allow updating existing PRs
+          git push -f origin ${{ steps.check_state.outputs.current_branch }}
+
+      - name: Run Tests
+        if: steps.check_state.outputs.updated == 'true'
+        env:
+          NEBULA_REPO_BRANCH: ${{ steps.check_state.outputs.current_branch }}
+          CI: true
+        # Tests will curl the files we just pushed to GitHub
+        run: |
+          ./tests/run_tests.sh
+
+      - name: Create Pull Request
+        if: steps.check_state.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Attempt to create PR. Ignore failure if it already exists.
+          gh pr create \
+            --title "chore: update mise to ${{ steps.check_state.outputs.current_branch }}" \
+            --body "Automated update triggered by supply chain firewall maintenance script.\n\nTests passed successfully against remote branch." \
+            --base main \
+            --head ${{ steps.check_state.outputs.current_branch }} \
+            || echo "PR creation failed, likely because it already exists."
