@@ -6,7 +6,7 @@ import time
 
 # We now rely on Real GitHub URLs, so we don't need a local server.
 # The branch is injected via NEBULA_REPO_BRANCH env var by the runner.
-BRANCH = os.environ.get("NEBULA_REPO_BRANCH", "main")
+BRANCH = os.environ.get("NEBULA_REPO_BRANCH", "master")
 RAW_BASE = f"https://raw.githubusercontent.com/nokesc/nebula-3rd-party-first-use/{BRANCH}"
 
 @pytest.fixture
@@ -41,6 +41,12 @@ def test_remote_curl_install(clean_env):
     env = os.environ.copy()
     env["NEBULA_REPO_BRANCH"] = BRANCH
     
+    # Support overriding the version requested via env var
+    # This allows regression testing of specific versions
+    if "MISE_VERSION" in os.environ:
+        env["MISE_VERSION"] = os.environ["MISE_VERSION"]
+        print(f"Requested Specific MISE_VERSION: {env['MISE_VERSION']}")
+
     result = subprocess.run(
         cmd, 
         shell=True, 
@@ -59,23 +65,38 @@ def test_remote_curl_install(clean_env):
     assert os.path.exists(os.path.expanduser("~/.local/bin/mise"))
 
 def test_tool_version_switching(clean_env):
-
-def test_tool_version_switching(clean_env):
     """Sanity check: Verify mise can install jq and switch versions between directories."""
     
-    # 1. Install mise first (clean check)
+    # 1. Install mise via curl (Remote Mode)
+    # We must use the remote curl install again because the file system script is NOT mounted
+    # in this container (per our "Minimal Workspace Mount" strategy).
+    
+    url = f"{RAW_BASE}/scripts/mise/install.sh"
+    cmd = f"curl -sSfL {url} | bash"
+    
+    env = os.environ.copy()
+    env["NEBULA_REPO_BRANCH"] = BRANCH
+    
     install_res = subprocess.run(
-        ["./scripts/mise/install.sh"], 
+        cmd, 
+        shell=True,
+        env=env,
         capture_output=True, 
         text=True
     )
+    
+    if install_res.returncode != 0:
+        print("Install STDOUT:", install_res.stdout)
+        print("Install STDERR:", install_res.stderr)
+        
     assert install_res.returncode == 0
     
     mise_bin = os.path.expanduser("~/.local/bin/mise")
     assert os.path.exists(mise_bin)
     
     # Environment for execution: Add mise to PATH and auto-confirm installs
-    env = os.environ.copy()
+    # We must RE-ADD the branch env var so specific logic works if needed, 
+    # though mise itself doesn't need it.
     env["PATH"] = f"{os.path.dirname(mise_bin)}:{env['PATH']}"
     env["MISE_YES"] = "1"
     

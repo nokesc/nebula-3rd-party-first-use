@@ -4,7 +4,7 @@ set -e
 # Determine Branch
 BRANCH="${NEBULA_REPO_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 
-if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+if [ "$BRANCH" = "master" ]; then
     echo "Error: Testing on main/master branch is restricted. Please create a feature branch."
     exit 1
 fi
@@ -29,9 +29,31 @@ echo "Running tests on branch: $BRANCH..."
 # Mount only the tests/workspace directory to /workspace
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$SCRIPT_DIR/workspace"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-docker run --rm \
-    -v "$WORKSPACE_DIR:/workspace" \
-    -e NEBULA_REPO_BRANCH="$BRANCH" \
-    nebula-upsteam-tests \
-    pytest test_install.py -v
+# Discovery: specific version or latest?
+if [ -z "$MISE_VERSION" ]; then
+    echo "No specific version requested. Running regression on ALL versions found in manifests..."
+    # Find all .conf files and extract the version base name
+    VERSIONS=$(find "$REPO_ROOT/manifests/mise" -name "*.conf" -exec basename {} .conf \;)
+else
+    VERSIONS="$MISE_VERSION"
+fi
+
+for VER in $VERSIONS; do
+    echo "=========================================================="
+    echo " TESTING VERSION: $VER"
+    echo "=========================================================="
+    
+    docker run --rm \
+        -v "$WORKSPACE_DIR:/workspace" \
+        -e NEBULA_REPO_BRANCH="$BRANCH" \
+        -e MISE_VERSION="$VER" \
+        nebula-upsteam-tests \
+        pytest -v
+        
+    if [ $? -ne 0 ]; then
+        echo "FAILED testing version $VER"
+        exit 1
+    fi
+done
