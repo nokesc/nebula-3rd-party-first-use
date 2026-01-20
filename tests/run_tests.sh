@@ -13,10 +13,15 @@ fi
 if [ -n "$(git status --porcelain)" ]; then
     echo "WARNING: You have uncommitted changes. The test will run against the REMOTE code on $BRANCH."
     echo "If your changes are not pushed, the test will verify the OLD code."
-    read -p "Continue? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
+    
+    if [ "$CI" = "true" ]; then
+        echo "CI detected: Proceeding automatically (assuming changes were pushed if needed)."
+    else
+        read -p "Continue? (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
     fi
 fi
 
